@@ -1,97 +1,130 @@
 # Webshell检测 - MLP+2-gram+TF-IDF
 # TODO: 实现Webshell检测的MLP训练脚本
+import os
+import glob
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from sklearn.feature_extraction.text import CountVectorizer, TfidfTransformer
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.decomposition import TruncatedSVD
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler
-import pandas as pd
-import numpy as np
+from torch.utils.data import TensorDataset, DataLoader
+import joblib  # [新增] 保存TF-IDF和SVD
 
-# 假设你有CSV数据，包含两列：
-# 'payload'（webshell代码文本或请求体），'label'（0=正常，1=webshell）
+# ========== 1. 数据加载 ==========
+root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# 1. 读取数据
-data = pd.read_csv("webshell_dataset.csv")
-texts = data['payload'].astype(str).values
-labels = data['label'].values
+pos_dir = os.path.join(root_dir, "data", "webshell_PHP")
+neg_file = os.path.join(root_dir, "data", "No_webshell", "wordpress_php.txt")
 
-# 2. 特征工程：2-gram词袋 + TF-IDF
-count_vect = CountVectorizer(ngram_range=(2, 2))  # 2-gram词袋
-X_counts = count_vect.fit_transform(texts)
+texts = []
+labels = []
 
-tfidf_transformer = TfidfTransformer()
-X_tfidf = tfidf_transformer.fit_transform(X_counts)
+def read_file(path):
+    try:
+        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+            return f.read()
+    except:
+        return ""
 
-# 转换为numpy数组
-X_features = X_tfidf.toarray()
+# Positive: 所有 A-Z 子文件夹下的 .txt
+pos_files = glob.glob(os.path.join(pos_dir, "*", "*.txt"))
+for f in pos_files:
+    texts.append(read_file(f))
+    labels.append(1)
 
-# 3. 归一化特征（均值0，方差1）
-scaler = StandardScaler()
-X_scaled = scaler.fit_transform(X_features)
+# Negative: 只有一个 txt 文件
+neg_text = read_file(neg_file)
+# 如果需要多个负样本，可以按行切分
+neg_samples = neg_text.split("\n\n")  # 用空行分割成片段
+for sample in neg_samples:
+    if sample.strip():
+        texts.append(sample)
+        labels.append(0)
 
-# 4. 转换为tensor
-X_tensor = torch.tensor(X_scaled, dtype=torch.float32)
-y_tensor = torch.tensor(labels, dtype=torch.float32).view(-1, 1)
+print(f"[INFO] Positive: {len([l for l in labels if l == 1])}, "
+      f"Negative: {len([l for l in labels if l == 0])}")
 
-# 5. 划分训练测试集
+# ========== 2. 特征工程 ==========
+vectorizer = TfidfVectorizer(ngram_range=(2, 2), max_features=3000)
+X_tfidf = vectorizer.fit_transform(texts)
+
+# 保存TF-IDF向量器
+joblib.dump(vectorizer, os.path.join(root_dir, "models", "webshell_vectorizer.pkl"))
+
+# SVD 降维到 200维
+svd = TruncatedSVD(n_components=200, random_state=42)
+X_reduced = svd.fit_transform(X_tfidf)
+
+# 保存SVD模型
+joblib.dump(svd, os.path.join(root_dir, "models", "webshell_svd.pkl"))
+
 X_train, X_test, y_train, y_test = train_test_split(
-    X_tensor, y_tensor, test_size=0.2, random_state=42
+    X_reduced, labels, test_size=0.2, random_state=42, stratify=labels
 )
 
-# 6. 定义MLP模型
-class WebshellMLP(nn.Module):
+# 转成 PyTorch 张量
+X_train_tensor = torch.tensor(X_train, dtype=torch.float32)
+y_train_tensor = torch.tensor(y_train, dtype=torch.float32)
+X_test_tensor = torch.tensor(X_test, dtype=torch.float32)
+y_test_tensor = torch.tensor(y_test, dtype=torch.float32)
+
+train_dataset = TensorDataset(X_train_tensor, y_train_tensor)
+test_dataset = TensorDataset(X_test_tensor, y_test_tensor)
+
+train_loader = DataLoader(train_dataset, batch_size=16, shuffle=True)
+test_loader = DataLoader(test_dataset, batch_size=16)
+
+# ========== 3. 定义 MLP 模型 ==========
+class MLP(nn.Module):
     def __init__(self, input_dim):
-        super(WebshellMLP, self).__init__()
+        super(MLP, self).__init__()
         self.fc1 = nn.Linear(input_dim, 5)
         self.fc2 = nn.Linear(5, 2)
         self.fc3 = nn.Linear(2, 1)
         self.relu = nn.ReLU()
         self.sigmoid = nn.Sigmoid()
-        
+    
     def forward(self, x):
         x = self.relu(self.fc1(x))
         x = self.relu(self.fc2(x))
         x = self.sigmoid(self.fc3(x))
         return x
 
-model = WebshellMLP(X_train.shape[1])
+model = MLP(input_dim=200)
 
-# 7. 训练设置
+# ========== 4. 训练配置 ==========
 criterion = nn.BCELoss()
 optimizer = optim.Adam(model.parameters(), lr=0.001)
-epochs = 20
-batch_size = 64
 
-# 8. 训练过程
-for epoch in range(epochs):
-    permutation = torch.randperm(X_train.size(0))
-    for i in range(0, X_train.size(0), batch_size):
-        indices = permutation[i:i+batch_size]
-        batch_x, batch_y = X_train[indices], y_train[indices]
-        
-        outputs = model(batch_x)
-        loss = criterion(outputs, batch_y)
-        
+# ========== 5. 训练循环 ==========
+for epoch in range(10):  # 10轮即可
+    model.train()
+    total_loss = 0
+    for X_batch, y_batch in train_loader:
         optimizer.zero_grad()
+        outputs = model(X_batch).squeeze()
+        loss = criterion(outputs, y_batch)
         loss.backward()
         optimizer.step()
-    
-    print(f"Epoch {epoch+1}/{epochs}, Loss: {loss.item():.4f}")
+        total_loss += loss.item()
+    print(f"Epoch {epoch+1}, Loss: {total_loss/len(train_loader):.4f}")
 
-# 9. 测试准确率
+# ========== 6. 测试集评估 ==========
+model.eval()
+correct = 0
+total = 0
 with torch.no_grad():
-    y_pred = model(X_test)
-    y_pred_label = (y_pred >= 0.5).float()
-    acc = (y_pred_label == y_test).sum() / y_test.size(0)
-    print(f"Test Accuracy: {acc:.4f}")
+    for X_batch, y_batch in test_loader:
+        outputs = model(X_batch).squeeze()
+        preds = (outputs >= 0.5).float()
+        correct += (preds == y_batch).sum().item()
+        total += y_batch.size(0)
 
-# 10. 保存模型及特征处理器
-torch.save(model.state_dict(), "../models/webshell_mlp.pth")
-import joblib
-joblib.dump(count_vect, "../models/webshell_count_vect.pkl")
-joblib.dump(tfidf_transformer, "../models/webshell_tfidf_transformer.pkl")
-joblib.dump(scaler, "../models/webshell_scaler.pkl")
+print(f"Test Accuracy: {correct/total:.4f}")
 
-print("✅ Webshell模型及特征处理器保存完成")
+# ========== 7. 保存模型 ==========
+os.makedirs(os.path.join(root_dir, "models"), exist_ok=True)
+model_path = os.path.join(root_dir, "models", "webshell_mlp.pth")
+torch.save(model.state_dict(), model_path)
+print(f"[INFO] 模型已保存到 {model_path}")

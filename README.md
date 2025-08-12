@@ -66,3 +66,4 @@ network_threat_detection/
 
 ## 训练数据来源
 DDOS：https://www.kaggle.com/datasets/aikenkazin/ddos-sdn-dataset?resource=download
+Webshell（选用其中的138shell）：https://github.com/tennc/webshell
