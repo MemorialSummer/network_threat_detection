@@ -1,6 +1,24 @@
+# Python依赖包及其具体版本
+torch==2.2.2
+torchvision==0.17.2
+torchaudio==2.2.2
+numpy==1.26.4
+pandas==2.3.1
+scikit-learn==1.4.0
+scipy==1.15.3
+joblib==1.3.2
+scapy==2.5.0
+python-dateutil==2.9.0.post0
+pytz==2025.2
+six==1.17.0
+threadpoolctl==3.3.0
+typing_extensions==4.10.0
+networkx==3.2.1  # PyTorch依赖
+pillow==10.2.0  # torchvision依赖
+filelock==3.13.1  # PyTorch依赖
 # Python依赖示例
-scikit-learn
-keras
-numpy
-pandas
-joblib
+# scikit-learn
+# keras
+# numpy
+# pandas
+# joblib
